@@ -450,3 +450,462 @@ docker exec b1094b67fd06 oc logs jlldev-dev-appserver-0 -n mas-jlldev-facilities
 .\update_hosts.ps1
 ipconfig /flushdns
 ```
+
+
+# IBM Maximo Application Suite (MAS) & OpenShift: Complete Air-Gap Architecture & Mirroring Guide
+
+**Scope:** Enterprise Air-Gap Architecture, Mirroring Modes (`direct`, `to-filesystem`, `from-filesystem`), Multi-Cluster Portability, and OpenShift Cluster Onboarding.
+
+---
+
+## 1. Executive Summary & Core Air-Gap Concepts
+
+### What is an "Air-Gap" Environment?
+An **air-gapped** (or disconnected) environment is a computing infrastructure physically or logically isolated from the public internet. Nodes, workloads, and control planes within an air-gapped network have **zero outbound or inbound internet connectivity**.
+
+In modern enterprise architectures, air-gapping is mandated for:
+- **Security & Zero Trust:** Eliminating attack surfaces, supply-chain vulnerabilities, and unauthorized data exfiltration.
+- **Compliance & Regulation:** Defense, government, healthcare, nuclear, banking, and critical infrastructure (SOC2, FedRAMP, ISO 27001).
+- **Network Sovereignty:** Self-contained environments that must remain fully functional regardless of upstream internet outages.
+
+```mermaid
+flowchart LR
+    subgraph Public_Internet["Public Internet (External)"]
+        IBM["IBM Entitled Registry (cp.icr.io)"]
+        Quay["Red Hat Quay (quay.io)"]
+        GitHub["CASE Bundles (github.com/IBM/cloud-pak)"]
+    end
+
+    subgraph Security_Boundary["Air-Gap Security Perimeter (Firewall / Physical Separation)"]
+        subgraph Internal_Network["Air-Gapped Private Network"]
+            PrivateReg["Private Registry v2 / Quay / Harbor"]
+            subgraph Cluster["OpenShift Cluster (SNO or Multi-Node)"]
+                CRIO["CRI-O Container Runtime"]
+                IDMS["ImageDigestMirrorSet (IDMS)"]
+                CatSrc["MAS CatalogSource"]
+                Operators["MAS Operators & Workloads"]
+            end
+        end
+    end
+
+    Public_Internet -.->|BLOCKED BY DEFAULT| Internal_Network
+    PrivateReg -->|Internal Network Only| CRIO
+    CRIO --> Operators
+    IDMS -.->|Redirects Pulls| CRIO
+    CatSrc -.->|References Local Catalog| Operators
+```
+
+---
+
+### The Disconnected OpenShift Challenge
+
+By default, containerized platforms like OpenShift and Kubernetes assume unrestricted access to public registries:
+- Operators pull from `quay.io/openshift-release-dev/...`
+- IBM MAS software pulls from `cp.icr.io/cp/...`
+- Red Hat Catalogs pull from `registry.redhat.io/...`
+
+When internet access is severed, every `pod create` or `image pull` fails immediately with `ErrImagePull` or `ImagePullBackOff`. To overcome this, the platform requires an **Enterprise Air-Gap Architecture** built on four foundational pillars:
+
+```mermaid
+flowchart TD
+    Pillar1["1. Local Private Registry<br/>(Stores all mirrored container images locally)"]
+    Pillar2["2. CASE Packages & oc ibm-pak<br/>(Metadata describing what images and versions are needed)"]
+    Pillar3["3. ImageDigestMirrorSet / IDMS<br/>(Cluster redirect rules: cp.icr.io -> local-registry)"]
+    Pillar4["4. CatalogSource<br/>(Local operator marketplace indexing the mirrored packages)"]
+
+    Pillar1 --- Pillar2 --- Pillar3 --- Pillar4
+```
+
+1. **Private Container Registry (Mirror Registry):** A secure, local container registry (e.g., Docker Registry v2, Quay Enterprise, Harbor, or OpenShift In-Cluster Registry) hosted inside the firewall.
+2. **CASE Bundles (`oc ibm-pak`):** Container Application Software for Enterprise (CASE) packages. These are signed specification archives detailing every image digest, Helm chart, dependency, and configuration parameter needed by MAS.
+3. **Cluster Pull Redirection (`ImageDigestMirrorSet` / IDMS):** A cluster-wide OpenShift rule. When an operator requests `cp.icr.io/cp/manage/maximo:9.1.20`, the OpenShift CRI-O runtime automatically rewrites the request to `192.168.2.225:32500/jllairgap/cp/manage/maximo:9.1.20`.
+4. **Offline CatalogSource:** A custom operator catalog pointing to the locally mirrored catalog image (`ibm-maximo-operator-catalog`) rather than IBM's cloud catalog.
+
+---
+
+## 2. Comparison of Mirroring Modes
+
+The MAS CLI provides three distinct mirroring operations via `mas mirror-images`:
+
+```mermaid
+flowchart TD
+    subgraph Public_Registries["Public Registries (Internet)"]
+        Public["cp.icr.io / quay.io / icr.io"]
+    end
+
+    subgraph Mode1["Mode 1: Direct"]
+        DirectBastion["Connected Bastion Host"]
+        Public -->|Streams in memory| DirectBastion
+        DirectBastion -->|Streams directly| TargetReg1["Target Private Registry"]
+    end
+
+    subgraph Mode2_3["Two-Stage Workflow: To-Filesystem & From-Filesystem"]
+        OnlineHost["Online Machine / Bastion"]
+        Public -->|Mode 2: to-filesystem| LocalDisk["Local Disk / External Drive (D:\...)"]
+        
+        LocalDisk -.->|Physical Move / Copy| OfflineHost["Offline Machine / Airgap Network"]
+        OfflineHost -->|Mode 3: from-filesystem| TargetReg2["Target Private Registry"]
+    end
+```
+
+### Technical Feature Matrix
+
+| Feature | Mode 1: `direct` | Mode 2: `to-filesystem` | Mode 3: `from-filesystem` |
+| :--- | :--- | :--- | :--- |
+| **Primary Action** | Stream remote -> local registry | Download remote -> local disk | Push local disk -> local registry |
+| **Internet Access** | **Required** | **Required** | **Not Required (Fully Offline)** |
+| **Registry Access** | **Required** | Not Required | **Required** |
+| **Host Disk Space** | Minimal (~a few MBs for logs) | **High (50 GB - 300 GB)** | Existing disk storage |
+| **Execution Phase** | Single-step | Stage 1 (Connected side) | Stage 2 (Disconnected side) |
+| **Network Topology** | "Semi-airgap" / Bastion on both nets | Internet-connected laptop / DMZ | Strictly isolated private network |
+| **Multi-Cluster Use** | Must re-stream for each cluster | **Reusable across infinite clusters** | Run once per cluster |
+
+---
+
+## 3. Mode 1: Direct Mirroring (`direct`)
+
+### Architecture & Mechanics
+In `direct` mode, the host machine running the MAS CLI must have two network routes active simultaneously:
+1. Outbound routing to the **Internet** (to authenticate with IBM Entitled Registry `cp.icr.io`).
+2. Inbound routing to the **Internal Private Registry** (e.g. `192.168.2.225:32500`).
+
+Images are pulled layer-by-layer into host RAM/temporary container buffer and pushed immediately to the target private registry. **No image tarballs or blob files are persisted on the host disk.**
+
+```
+[IBM Registry (cp.icr.io)] ──(Internet)──> [Docker Host] ──(LAN / VPN)──> [Cluster Registry]
+```
+
+### Execution Procedure
+
+#### Method A: Interactive Wizard
+```bash
+mas mirror-images
+```
+1. **Catalog Version:** `v9-260730-amd64`
+2. **Channel:** `9.1.x`
+3. **Working Directory:** `/mnt/registry`
+4. **Mirror Mode:** `1` *(Direct)*
+5. **Mirror Registry Host:** `192.168.2.225`
+6. **Mirror Registry Port:** `32500`
+7. **Mirror Registry Prefix:** `jllairgap`
+8. **Mirror Registry Username:** `jllairgap`
+9. **Mirror Registry Password:** `jllairgap@2026`
+10. **IBM Entitlement Key:** `<YOUR_IBM_KEY>`
+11. **Select Components:** Choose components (Catalog, Core, Manage, Facilities, Dependencies).
+
+#### Method B: Automated CLI Command
+```bash
+mas mirror-images \
+  -m direct \
+  -d /mnt/registry \
+  -H 192.168.2.225 \
+  -P 32500 \
+  -x jllairgap \
+  -u jllairgap \
+  -p jllairgap@2026 \
+  -c v9-260730-amd64 \
+  -C 9.1.x \
+  --ibm-entitlement <YOUR_IBM_KEY> \
+  --mirror-catalog \
+  --mirror-core \
+  --mirror-manage \
+  --mirror-facilities \
+  --mirror-sls \
+  --mirror-tsm \
+  --mirror-mongo \
+  --mirror-odf \
+  --mirror-cli \
+  --no-confirm
+```
+
+> [!TIP]
+> **Best For:** Fast initial setups where the workstation (e.g., Windows workstation `192.168.2.157`) sits on the same local subnet as the OpenShift node (`192.168.2.225`) while retaining internet access.
+
+---
+
+## 4. Mode 2: Mirroring to Filesystem (`to-filesystem`)
+
+### Architecture & Mechanics
+`to-filesystem` is **Stage 1** of a true physical air-gap deployment. It runs on an internet-connected workstation, staging server, or laptop.
+
+The command performs two critical operations:
+1. **Pulls Container Layers:** Connects to `cp.icr.io`, `quay.io`, and downloads image layers directly into a local folder structure (`$MIRROR_WORKING_DIR`).
+2. **Generates Mirror Manifests:** Uses `oc ibm-pak` to generate `images-mapping-to-filesystem.txt` and `images-mapping-from-filesystem.txt`.
+
+```
+[IBM Registry (cp.icr.io)] ──(Internet)──> [Connected Host] ──(Disk Write)──> [Local / External Drive]
+```
+
+### Storage Directory Structure on Disk
+When saved to disk (e.g. `D:\airgapinstallation\mirrorfiles`), the directory is structured as follows:
+
+```
+D:\airgapinstallation\mirrorfiles/
+├── manifests/
+│   ├── to-filesystem/
+│   │   ├── catalog_v9-260730-amd64.txt       # Mapping from internet -> file://
+│   │   ├── ibm-mas_9.1.20.txt
+│   │   ├── ibm-mas-manage_9.1.20.txt
+│   │   └── ibm-mas-facilities_9.1.13.txt
+│   └── from-filesystem/
+│       ├── catalog_v9-260730-amd64.txt       # Mapping from file:// -> Target Registry
+│       ├── ibm-mas_9.1.20.txt
+│       ├── ibm-mas-manage_9.1.20.txt
+│       └── ibm-mas-facilities_9.1.13.txt
+├── v2/                                        # OCI Image Blobs and Manifests
+│   ├── blobs/sha256/
+│   └── repositories/
+└── logs/
+```
+
+### Capacity Planning Guidelines
+- **Catalog + MAS Core + Dependencies (SLS, Mongo):** ~60 GB – 80 GB
+- **Maximo Manage:** ~50 GB – 70 GB
+- **Maximo Facilities (TRIRIGA):** ~20 GB – 30 GB
+- **Recommended Free Disk Space:** Minimum **200 GB – 300 GB** on the staging drive.
+
+### Execution Procedure
+
+```bash
+mas mirror-images \
+  -m to-filesystem \
+  -d /mnt/registry \
+  -H 192.168.2.225 \
+  -P 32500 \
+  -x jllairgap \
+  -c v9-260730-amd64 \
+  -C 9.1.x \
+  --ibm-entitlement <YOUR_IBM_KEY> \
+  --mirror-catalog \
+  --mirror-core \
+  --mirror-manage \
+  --mirror-facilities \
+  --mirror-sls \
+  --mirror-tsm \
+  --mirror-mongo \
+  --mirror-odf \
+  --mirror-cli \
+  --no-confirm
+```
+
+> [!NOTE]
+> In `to-filesystem`, no registry username/password is required because the tool is not writing to any remote registry—only to the local disk.
+
+---
+
+## 5. Mode 3: Mirroring from Filesystem (`from-filesystem`)
+
+### Architecture & Mechanics
+`from-filesystem` is **Stage 2** of the true physical air-gap workflow. It is executed **inside the secure air-gapped network**.
+
+1. You disconnect the external drive (or move the staging folder) past the security barrier.
+2. Mount the folder into your air-gapped bastion host or CLI container (`/mnt/registry`).
+3. The command reads the raw container blobs from the drive and uploads them into the internal cluster registry.
+4. **Zero internet requests are initiated.**
+
+```
+[Local / External Drive] ──(Disk Read)──> [Air-Gapped Host] ──(Local Network)──> [Cluster Registry]
+```
+
+### Execution Procedure
+
+```bash
+mas mirror-images \
+  -m from-filesystem \
+  -d /mnt/registry \
+  -H 192.168.2.225 \
+  -P 32500 \
+  -x jllairgap \
+  -u jllairgap \
+  -p jllairgap@2026 \
+  -c v9-260730-amd64 \
+  -C 9.1.x \
+  --mirror-catalog \
+  --mirror-core \
+  --mirror-manage \
+  --mirror-facilities \
+  --mirror-sls \
+  --mirror-tsm \
+  --mirror-mongo \
+  --mirror-odf \
+  --mirror-cli \
+  --no-confirm
+```
+
+> [!IMPORTANT]
+> Because this step runs inside the air-gapped network, **no IBM Entitlement Key is required**. You only provide authentication for your local private registry (`jllairgap` / `jllairgap@2026`).
+
+---
+
+## 6. The Multi-Cluster Airgap Scenario (Cluster A -> Filesystem -> Cluster B)
+
+A frequent enterprise requirement is:
+> *"We want to download the images once to the filesystem from our internet-connected site (Host/Cluster A), and then use those same files to configure and deploy Cluster B (e.g., QA, Prod, or an isolated client datacenter)."*
+
+```mermaid
+flowchart TD
+    subgraph Site_A["Site A: Connected Environment"]
+        Internet["IBM Entitled Registry (cp.icr.io)"]
+        HostA["Host A (Connected Bastion)"]
+        Disk["External Storage / Drive<br/>(D:\airgapinstallation\mirrorfiles)"]
+
+        Internet -->|mas mirror-images -m to-filesystem| HostA
+        HostA --> Disk
+    end
+
+    Disk ==>|Physical Media Transfer or Secure File Copy| Site_B
+
+    subgraph Site_B["Site B: Isolated Air-Gapped Datacenter"]
+        HostB["Host B (Isolated Bastion)"]
+        ClusterBRegistry["Cluster B Private Registry<br/>(e.g., 10.10.20.50:5000)"]
+        ClusterB["OpenShift Cluster B"]
+
+        Disk --> HostB
+        HostB -->|mas mirror-images -m from-filesystem| ClusterBRegistry
+        ClusterBRegistry --> ClusterB
+    end
+```
+
+### Why is This 100% Feasible?
+1. **Content-Addressable Storage (Immutable Blobs):** Container images are structured as cryptographic sha256 hashes (`sha256:8b78bc12...`). An image blob for Maximo Manage 9.1.20 downloaded on Site A is bit-for-bit identical to the image needed on Site B.
+2. **Zero Cluster Couplings in Raw Images:** The downloaded image files on disk contain no hostname, IP address, or cluster name bindings.
+
+---
+
+### Handling Target Registry Differences for Cluster B
+
+When `to-filesystem` was run on Host A, it generated `manifests/from-filesystem/*.txt`. The right-hand side of each mapping contains the target registry specified at download time:
+```text
+file:///cpopen/ibm-maximo-operator-catalog@sha256:... = 192.168.2.225:32500/jllairgap/cpopen/...
+```
+
+If Cluster B uses a **different** registry IP or hostname (for example: `10.10.20.50:5000` or `registry.cluster-b.internal`), you have two simple ways to handle it:
+
+#### Strategy 1: Specify Cluster B's Address During `to-filesystem` (Easiest)
+If you already know Cluster B's future registry endpoint, input Cluster B's registry host and port when running `to-filesystem` on Host A. The generated `from-filesystem` manifests will already be pre-configured for Cluster B!
+
+#### Strategy 2: Batch Update Manifests on Cluster B (If Registry Differs)
+If Cluster B's registry address changed or was unknown during the download, update the manifest files on Host B before running `from-filesystem`:
+
+```bash
+# Example: Replacing Cluster A IP (192.168.2.225:32500) with Cluster B IP (10.10.20.50:5000)
+cd /mnt/registry/manifests/from-filesystem/
+sed -i 's/192.168.2.225:32500/10.10.20.50:5000/g' *.txt
+```
+
+Now, when `mas mirror-images -m from-filesystem` executes, it will upload all disk images directly into Cluster B's registry!
+
+---
+
+### Cluster B Onboarding Checklist (OpenShift Configuration)
+
+Before running `mas install` on Cluster B, perform the following cluster configurations:
+
+#### 1. Configure OpenShift Trust for Cluster B's Registry
+If Cluster B's registry uses a self-signed or internal CA, inject the certificate into OpenShift's cluster-wide trust bundle:
+```bash
+oc create configmap registry-cas -n openshift-config \
+  --from-file=10.10.20.50..5000=/mnt/registry/cluster-b-ca.crt
+
+oc patch image.config.openshift.io/cluster --type=merge \
+  -p '{"spec":{"additionalTrustedCA":{"name":"registry-cas"}}}'
+```
+
+#### 2. Configure Insecure Registry (If Using NodePort / Raw IP)
+If accessing the registry via IP instead of a verified DNS domain name:
+```bash
+oc patch image.config.openshift.io/cluster --type=merge \
+  -p '{"spec":{"registrySources":{"insecureRegistries":["10.10.20.50:5000"]}}}'
+```
+
+#### 3. Update Cluster B's Global Pull Secret
+Cluster nodes must be authorized to pull from Cluster B's registry:
+```bash
+# 1. Extract existing secret
+oc get secret pull-secret -n openshift-config -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > /tmp/pull-secret.json
+
+# 2. Add Cluster B registry credentials using podman or jq
+podman login --authfile /tmp/pull-secret.json -u <user> -p <pass> 10.10.20.50:5000
+
+# 3. Update cluster secret
+oc set data secret/pull-secret -n openshift-config --from-file=.dockerconfigjson=/tmp/pull-secret.json
+```
+
+#### 4. Apply the ImageDigestMirrorSet (IDMS)
+Apply the generated IDMS so OpenShift intercepts calls to `cp.icr.io` and routes them to Cluster B:
+```yaml
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: mas-ibm-catalog-cluster-b
+spec:
+  imageDigestMirrors:
+    - mirrors:
+        - 10.10.20.50:5000/jllairgap/cpopen
+      source: icr.io/cpopen
+    - mirrors:
+        - 10.10.20.50:5000/jllairgap/cp
+      source: cp.icr.io/cp
+```
+
+#### 5. Inject Offline CatalogSource on Cluster B
+```yaml
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: ibm-operator-catalog
+  namespace: openshift-marketplace
+spec:
+  displayName: IBM Operator Catalog (Offline)
+  publisher: IBM
+  sourceType: grpc
+  image: 10.10.20.50:5000/jllairgap/cpopen/ibm-maximo-operator-catalog:v9-260730-amd64
+  updateStrategy:
+    registryPoll:
+      interval: 45m
+```
+
+Once verified (`oc get catalogsource -n openshift-marketplace` shows `READY`), Cluster B is fully primed to run `mas install`.
+
+---
+
+## 7. Troubleshooting & Operational Best Practices
+
+### A. Windows & Docker Disk Space Exhaustion
+When downloading 150+ GB of images in `to-filesystem`:
+- **The Pitfall:** Docker Desktop's default virtual disk (`vhdx`) resides on `C:\`. If you run `to-filesystem` without mounting the external drive, your Windows `C:` drive will quickly hit 100% full.
+- **The Remedy:** Always mount an external or high-capacity drive (e.g. `D:\airgapinstallation\mirrorfiles`) directly into the container volume mount:
+  ```powershell
+  -v D:\airgapinstallation\mirrorfiles:/mnt/registry
+  ```
+  And verify `--dir=/mnt/registry` is used.
+
+### B. Go TLS Certificate Rejection on IP Endpoints
+- **The Pitfall:** If your registry endpoint is an IP address (`192.168.2.225:32500`), Go's internal crypto library rejects IP certificates unless the certificate contains an exact **Subject Alternative Name (SAN) of type IP**.
+- **The Remedy:** Add the IP and port to `insecureRegistries` in `image.config.openshift.io/cluster`. This allows the CRI-O daemon on the OpenShift node to pull images over TLS while bypassing IP SAN validation.
+
+### C. Single Node OpenShift (SNO) Resource Management
+- **The Pitfall:** In SNO, every control plane and application pod shares the same physical node. MAS operators default to multi-node enterprise resource allocations (e.g., 2Gi - 4Gi RAM per pod).
+- **The Remedy:** Before or during installation, patch `ManageServerBundle` and deployment manifests to reduce initial `requests` while maintaining reasonable `limits`:
+  ```bash
+  requests: { cpu: "100m", memory: "50Mi" }
+  ```
+
+---
+
+## 8. Summary Decision Flowchart
+
+Use this decision tree to select the appropriate mirroring strategy for your engagement:
+
+```mermaid
+flowchart TD
+    Start["Do you need to deploy IBM MAS into an Air-Gapped OpenShift Cluster?"] --> Q1{"Does your current workstation have simultaneous network access to BOTH the internet AND the OpenShift cluster registry?"}
+
+    Q1 -- YES --> Direct["Use Mode 1: DIRECT<br/>• Fastest setup<br/>• Zero disk storage needed<br/>• Streams straight into registry"]
+
+    Q1 -- NO --> Q2{"Are you deploying across multiple clusters (e.g. Cluster A -> Cluster B / Prod) or strict physical isolation?"}
+
+    Q2 -- YES --> TwoStage["Use TWO-STAGE AIR-GAP:<br/>1. Run Mode 2: 'to-filesystem' on connected host<br/>2. Physically transport disk<br/>3. Run Mode 3: 'from-filesystem' on target cluster"]
+    Q2 -- NO --> CheckNet["Establish temporary bastion routing or use Direct Mode"]
+```
+
