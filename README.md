@@ -28,15 +28,15 @@ flowchart TD
 
         subgraph Ingress_Routing["OpenShift Ingress & NodePort"]
             NodePort["NodePort 32500 (Direct IP Registry)"]
-            HAProxyRouter["HAProxy Ingress Router (*.apps.jll-airgap.dev)"]
+            HAProxyRouter["HAProxy Ingress Router (*.apps.POC-airgap.dev)"]
         end
 
         subgraph Namespaces["Core & Application Namespaces"]
             AirgapReg["airgap-registry<br/>(Private Registry v2)"]
-            MasCore["mas-jlldev-core<br/>(CoreIDP, Suite Admin, SLS, MongoDB)"]
-            MasManage["mas-jlldev-manage<br/>(Maximo Manage 9.1.20)"]
-            MasFacilities["mas-jlldev-facilities<br/>(Maximo Facilities / TRIRIGA 9.1.13)"]
-            Pipelines["mas-jlldev-pipelines<br/>(OpenShift Pipelines / Tekton)"]
+            MasCore["mas-POCdev-core<br/>(CoreIDP, Suite Admin, SLS, MongoDB)"]
+            MasManage["mas-POCdev-manage<br/>(Maximo Manage 9.1.20)"]
+            MasFacilities["mas-POCdev-facilities<br/>(Maximo Facilities / TRIRIGA 9.1.13)"]
+            Pipelines["mas-POCdev-pipelines<br/>(OpenShift Pipelines / Tekton)"]
         end
     end
 
@@ -55,13 +55,13 @@ flowchart TD
 | Component | Specification / Value | Description |
 | :--- | :--- | :--- |
 | **Cluster Node** | `00-be-43-80-03-43` (`192.168.2.225`) | SNO OpenShift 4.22.18 |
-| **API Endpoint** | `https://api.jll-airgap.dev:6443` | Cluster API |
-| **Ingress Domain** | `*.apps.jll-airgap.dev` | Wildcard application routes |
+| **API Endpoint** | `https://api.POC-airgap.dev:6443` | Cluster API |
+| **Ingress Domain** | `*.apps.POC-airgap.dev` | Wildcard application routes |
 | **Bastion Host** | Windows 11 Workstation (`192.168.2.157`) | Docker Desktop & SQL Server |
-| **MAS Instance / WS** | Instance: `jlldev` \| Workspace: `dev` | Target suite deployment |
+| **MAS Instance / WS** | Instance: `POCdev` \| Workspace: `dev` | Target suite deployment |
 | **Storage Class** | `lvms-vg1` (`topolvm.io`, RWO) | Thin pool backed by `/dev/loop1` |
-| **Private Registry** | `192.168.2.225:32500` (`jllairgap`) | LoadBalancer / NodePort service |
-| **Registry Credentials** | `jllairgap` / `jllairgap@2026` | Injected into Global Pull Secret |
+| **Private Registry** | `192.168.2.225:32500` (`POCairgap`) | LoadBalancer / NodePort service |
+| **Registry Credentials** | `POCairgap` / `POCairgap@2026` | Injected into Global Pull Secret |
 
 ---
 
@@ -77,12 +77,12 @@ Before commencing air-gap mirroring or MAS deployment, verify the following base
      ```powershell
      docker run -dit --name ibmmas-cli `
        -v D:\airgapinstallation\mirrorfiles:/mnt/registry `
-       -v C:\Users\JLLRND1\.kube:/root/.kube `
+       -v C:\Users\POCRND1\.kube:/root/.kube `
        quay.io/ibmmas/cli:23.17.1 bash
      ```
 3. **OpenShift CLI (`oc`)**: Present inside container and validated:
    ```bash
-   oc login -u kubeadmin -p <password> https://api.jll-airgap.dev:6443
+   oc login -u kubeadmin -p <password> https://api.POC-airgap.dev:6443
    ```
 
 ### B. Microsoft SQL Server Setup
@@ -127,7 +127,7 @@ Both Maximo Manage and Maximo Facilities require dedicated databases on Microsof
 2. Provision a 100Gi PVC `airgap-registry-storage` using StorageClass `lvms-vg1`.
 3. Deploy the registry pod and expose it via:
    - **Service `airgap-registry-lb`**: Type `LoadBalancer` mapping port `5000` to NodePort `32500`.
-   - **Route `airgap-registry`**: Passthrough route on `airgap-registry.apps.jll-airgap.dev`.
+   - **Route `airgap-registry`**: Passthrough route on `airgap-registry.apps.POC-airgap.dev`.
 
 ### Step 2: Resolving the LVM Storage Deadlock (Root Cause Analysis)
 
@@ -138,7 +138,7 @@ During setup, `airgap-registry-storage` hung indefinitely in `Pending`. The inve
 - **Resolution**:
   ```bash
   # 1. Delete broken LVMCluster and CSV in openshift-lvm-storage
-  oc delete lvmcluster jll-airgap -n openshift-lvm-storage
+  oc delete lvmcluster POC-airgap -n openshift-lvm-storage
   oc delete sub lvms-operator -n openshift-lvm-storage
   oc delete csv lvms-operator.v4.22.0 -n openshift-lvm-storage
 
@@ -166,7 +166,7 @@ During setup, `airgap-registry-storage` hung indefinitely in `Pending`. The inve
    oc patch image.config.openshift.io/cluster --type=merge -p '{"spec":{"registrySources":{"insecureRegistries":["192.168.2.225:32500"]}}}'
    ```
 4. **Update Global Cluster Pull Secret**:
-   Add base64 credentials for `192.168.2.225:32500` (`user: jllairgap`, `password: jllairgap@2026`) into `openshift-config/pull-secret`.
+   Add base64 credentials for `192.168.2.225:32500` (`user: POCairgap`, `password: POCairgap@2026`) into `openshift-config/pull-secret`.
 
 ---
 
@@ -226,9 +226,9 @@ mas mirror-images \
   -d /mnt/registry \
   -H 192.168.2.225 \
   -P 32500 \
-  -x jllairgap \
-  -u jllairgap \
-  -p jllairgap@2026 \
+  -x POCairgap \
+  -u POCairgap \
+  -p POCairgap@2026 \
   -c v9-260730-amd64 \
   -C 9.1.x \
   --ibm-entitlement <YOUR_IBM_ENTITLEMENT_KEY> \
@@ -251,7 +251,7 @@ mas mirror-images \
 - **Maximo Manage**: `9.1.20`
 - **Maximo Facilities (MREF)**: `9.1.13`
 - **Dependencies**: SLS `3.13.0`, TSM `1.7.7`, MongoDB CE `8.0.23`, ODF `4.15`
-- **ImageDigestMirrorSet (IDMS)**: Applied `mas-ibm-catalog-jllairgap` to redirect all image pulls from `cp.icr.io` to `192.168.2.225:32500/jllairgap`.
+- **ImageDigestMirrorSet (IDMS)**: Applied `mas-ibm-catalog-POCairgap` to redirect all image pulls from `cp.icr.io` to `192.168.2.225:32500/POCairgap`.
 
 ---
 
@@ -297,7 +297,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: facilities-config
-  namespace: mas-jlldev-pipelines
+  namespace: mas-POCdev-pipelines
 data:
   mas_ws_facilities_storage_log_size: "30"
   mas_ws_facilities_storage_userfiles_size: "50"
@@ -305,14 +305,14 @@ data:
   mas_ws_facilities_dwfagents: "[]"
 ```
 
-#### B. Facilities SQL Server JDBC (`jdbc-jlldev-facilities.yaml`)
+#### B. Facilities SQL Server JDBC (`jdbc-POCdev-facilities.yaml`)
 
 ```yaml
 apiVersion: config.mas.ibm.com/v1
 kind: JdbcCfg
 metadata:
-  name: jlldev-facilities-jdbc
-  namespace: mas-jlldev-core
+  name: POCdev-facilities-jdbc
+  namespace: mas-POCdev-core
 spec:
   config:
     url: "jdbc:sqlserver://192.168.2.157:1433;databaseName=mref91;encrypt=false;trustServerCertificate=true;"
@@ -322,14 +322,14 @@ spec:
   workspaceId: "dev"
 ```
 
-#### C. Manage SQL Server JDBC (`jdbc-jlldev-manage.yaml`)
+#### C. Manage SQL Server JDBC (`jdbc-POCdev-manage.yaml`)
 
 ```yaml
 apiVersion: config.mas.ibm.com/v1
 kind: JdbcCfg
 metadata:
-  name: jlldev-manage-jdbc
-  namespace: mas-jlldev-core
+  name: POCdev-manage-jdbc
+  namespace: mas-POCdev-core
 spec:
   config:
     url: "jdbc:sqlserver://192.168.2.157:1433;databaseName=mcore91;encrypt=false;trustServerCertificate=true;"
@@ -349,9 +349,9 @@ Launch the installation from the CLI container:
 
 ```bash
 mas install \
-  --mas-instance-id jlldev \
+  --mas-instance-id POCdev \
   --mas-workspace-id dev \
-  --mas-workspace-name "JLL Development" \
+  --mas-workspace-name "POC Development" \
   --mas-catalog-version v9-260730-amd64 \
   --mas-channel 9.1.x \
   --license-file /mnt/registry/mas/license.dat \
@@ -362,7 +362,7 @@ mas install \
   --install-facilities
 ```
 
-### Pipeline Tasks Executed (PipelineRun `jlldev-install-261103-1255-00eq0h`)
+### Pipeline Tasks Executed (PipelineRun `POCdev-install-261103-1255-00eq0h`)
 
 1. `pipeline-start`: Initializes workspace config.
 2. `ibm-catalogs`: Injects offline CatalogSources backed by mirrored registry.
@@ -370,7 +370,7 @@ mas install \
 4. `mongodb`: Provisions MongoDB Community Edition 8.0 cluster for suite metadata.
 5. `sls`: Deploys Suite License Service and bootstraps `license.dat`.
 6. `dro` & `bas`: Installs Data Reporter Operator and Business Activity Services.
-7. `suite-install`: Deploys IBM MAS Core Operator and reconciles Suite CR `jlldev`.
+7. `suite-install`: Deploys IBM MAS Core Operator and reconciles Suite CR `POCdev`.
 8. `suite-config`: Binds SLS, MongoDB, and SystemDB to MAS Core.
 9. `app-install-manage`: Generates Manage build configs, runs `maxinst`, and provisions bundle pods.
 10. `app-install-facilities`: Provisions TRIRIGA data initialization, runs schema updates, and deploys Liberty app servers.
@@ -392,14 +392,14 @@ During the automated rollout, multiple environmental and configuration issues oc
 
 ### 2. Single Node OpenShift Memory Deadlock (`ManageServerBundle/all`)
 
-- **Symptom**: Maximo Manage server bundle pod `jlldev-dev-all-dddc9cd55-gwd6f` stuck in `Pending`:
+- **Symptom**: Maximo Manage server bundle pod `POCdev-dev-all-dddc9cd55-gwd6f` stuck in `Pending`:
   ```
   0/1 nodes available: 1 Insufficient memory.
   ```
 - **Root Cause**: The operator requested 2Gi of memory for the `all` container and 500Mi for `monitoragent`. SNO allocatable memory was at 1.98Gi available.
 - **Fix**: Patched `ManageServerBundle/all` and its deployment resource requests:
   ```bash
-  oc patch manageserverbundle jlldev-dev-all -n mas-jlldev-manage --type=merge -p '{
+  oc patch manageserverbundle POCdev-dev-all -n mas-POCdev-manage --type=merge -p '{
     "spec": {
       "settings": {
         "resources": {
@@ -419,22 +419,22 @@ During the automated rollout, multiple environmental and configuration issues oc
 
 - **Symptom**: TRIRIGA appserver PVCs failed to bind.
 - **Root Cause**: Operator default templates requested `ReadWriteMany` (RWX), which is unsupported by the local TopoLVM driver (`lvms-vg1`).
-- **Fix**: Re-created PVC definitions (`log-jlldev-dev-appserver-0`, `userfiles-jlldev-dev-appserver-0`, `jlldev-dev-multiagents-log`, `jlldev-dev-multiagents-userfiles`) with `accessModes: ["ReadWriteOnce"]` and matching RWO storage classes.
+- **Fix**: Re-created PVC definitions (`log-POCdev-dev-appserver-0`, `userfiles-POCdev-dev-appserver-0`, `POCdev-dev-multiagents-log`, `POCdev-dev-multiagents-userfiles`) with `accessModes: ["ReadWriteOnce"]` and matching RWO storage classes.
 
 ### 4. CoreIDP Startup Probe Timeout & API Warmup
 
-- **Symptom**: `https://admin.jlldev.apps.jll-airgap.dev` displayed OpenShift error:
+- **Symptom**: `https://admin.POCdev.apps.POC-airgap.dev` displayed OpenShift error:
   ```
   Application is not available (503 Service Unavailable)
   ```
-- **Root Cause**: `jlldev-coreidp` was cold-starting its internal JAX-RS services (`api-usermgmt-internal`). The initial response took 43 seconds, exceeding the default 20-second startup probe timeout.
+- **Root Cause**: `POCdev-coreidp` was cold-starting its internal JAX-RS services (`api-usermgmt-internal`). The initial response took 43 seconds, exceeding the default 20-second startup probe timeout.
 - **Fix**: Increased probe timeouts and executed direct warm-up curl requests against `api/probes/readiness` and `idplogin/probes/readiness`. Response time dropped to <2s, and `coreidp` reached `1/1 Running`.
 
 ### 5. Windows Client DNS Resolution (`DNS_PROBE_FINISHED_NXDOMAIN`)
 
-- **Symptom**: Browsing to `auth.jlldev.apps.jll-airgap.dev` failed on Windows with `DNS_PROBE_FINISHED_NXDOMAIN`.
+- **Symptom**: Browsing to `auth.POCdev.apps.POC-airgap.dev` failed on Windows with `DNS_PROBE_FINISHED_NXDOMAIN`.
 - **Root Cause**: Windows `hosts` file had invalid entries (wildcards like `*.apps...` and URL paths with `/login` are not supported by the Windows DNS resolver).
-- **Fix**: Created and executed the automation script [`update_hosts.ps1`](file:///C:/Users/JLLRND1/update_hosts.ps1) to inject clean, exact FQDN mappings pointing to `192.168.2.225`.
+- **Fix**: Created and executed the automation script [`update_hosts.ps1`](file:///C:/Users/POCRND1/update_hosts.ps1) to inject clean, exact FQDN mappings pointing to `192.168.2.225`.
 
 ---
 
@@ -444,12 +444,12 @@ During the automated rollout, multiple environmental and configuration issues oc
 
 | Service | URL | Status |
 | :--- | :--- | :--- |
-| **OpenShift Web Console** | `https://console-openshift-console.apps.jll-airgap.dev/dashboards` | Online |
-| **MAS Admin Console** | `https://admin.jlldev.apps.jll-airgap.dev` | Online (HTTP 200) |
-| **MAS Authentication** | `https://auth.jlldev.apps.jll-airgap.dev/login` | Online (HTTP 200) |
-| **MAS Suite Homepage** | `https://home.jlldev.apps.jll-airgap.dev` | Online (HTTP 200) |
-| **Maximo Manage** | `https://dev.manage.jlldev.apps.jll-airgap.dev/maximo/` | Online (HTTP 302 -> UI) |
-| **Maximo Facilities** | `https://dev.facilities.jlldev.apps.jll-airgap.dev` | Running Schema Update |
+| **OpenShift Web Console** | `https://console-openshift-console.apps.POC-airgap.dev/dashboards` | Online |
+| **MAS Admin Console** | `https://admin.POCdev.apps.POC-airgap.dev` | Online (HTTP 200) |
+| **MAS Authentication** | `https://auth.POCdev.apps.POC-airgap.dev/login` | Online (HTTP 200) |
+| **MAS Suite Homepage** | `https://home.POCdev.apps.POC-airgap.dev` | Online (HTTP 200) |
+| **Maximo Manage** | `https://dev.manage.POCdev.apps.POC-airgap.dev/maximo/` | Online (HTTP 302 -> UI) |
+| **Maximo Facilities** | `https://dev.facilities.POCdev.apps.POC-airgap.dev` | Running Schema Update |
 
 ### Superuser Administrator Credentials
 
@@ -464,14 +464,14 @@ During the automated rollout, multiple environmental and configuration issues oc
 
 ```bash
 # Check all MAS Core pods
-docker exec b1094b67fd06 oc get pods -n mas-jlldev-core
+docker exec b1094b67fd06 oc get pods -n mas-POCdev-core
 
 # Check Maximo Manage pod and ping status
-docker exec b1094b67fd06 oc get pods -n mas-jlldev-manage
-docker exec b1094b67fd06 oc exec -n mas-jlldev-manage deployment/jlldev-dev-all -c all -- curl -ksi https://localhost:9443/maximo/api/ping?ready=1
+docker exec b1094b67fd06 oc get pods -n mas-POCdev-manage
+docker exec b1094b67fd06 oc exec -n mas-POCdev-manage deployment/POCdev-dev-all -c all -- curl -ksi https://localhost:9443/maximo/api/ping?ready=1
 
 # Check Facilities appserver logs
-docker exec b1094b67fd06 oc logs jlldev-dev-appserver-0 -n mas-jlldev-facilities -c appserver --tail=50
+docker exec b1094b67fd06 oc logs POCdev-dev-appserver-0 -n mas-POCdev-facilities -c appserver --tail=50
 ```
 
 ### Windows DNS Refresh
@@ -626,9 +626,9 @@ mas mirror-images
 4. **Mirror Mode:** `1` *(Direct)*
 5. **Mirror Registry Host:** `192.168.2.225`
 6. **Mirror Registry Port:** `32500`
-7. **Mirror Registry Prefix:** `jllairgap`
-8. **Mirror Registry Username:** `jllairgap`
-9. **Mirror Registry Password:** `jllairgap@2026`
+7. **Mirror Registry Prefix:** `POCairgap`
+8. **Mirror Registry Username:** `POCairgap`
+9. **Mirror Registry Password:** `POCairgap@2026`
 10. **IBM Entitlement Key:** `<YOUR_IBM_KEY>`
 11. **Select Components:** Choose components (Catalog, Core, Manage, Facilities, Dependencies).
 
@@ -640,9 +640,9 @@ mas mirror-images \
   -d /mnt/registry \
   -H 192.168.2.225 \
   -P 32500 \
-  -x jllairgap \
-  -u jllairgap \
-  -p jllairgap@2026 \
+  -x POCairgap \
+  -u POCairgap \
+  -p POCairgap@2026 \
   -c v9-260730-amd64 \
   -C 9.1.x \
   --ibm-entitlement <YOUR_IBM_KEY> \
@@ -716,7 +716,7 @@ mas mirror-images \
   -d /mnt/registry \
   -H 192.168.2.225 \
   -P 32500 \
-  -x jllairgap \
+  -x POCairgap \
   -c v9-260730-amd64 \
   -C 9.1.x \
   --ibm-entitlement <YOUR_IBM_KEY> \
@@ -760,9 +760,9 @@ mas mirror-images \
   -d /mnt/registry \
   -H 192.168.2.225 \
   -P 32500 \
-  -x jllairgap \
-  -u jllairgap \
-  -p jllairgap@2026 \
+  -x POCairgap \
+  -u POCairgap \
+  -p POCairgap@2026 \
   -c v9-260730-amd64 \
   -C 9.1.x \
   --mirror-catalog \
@@ -778,7 +778,7 @@ mas mirror-images \
 ```
 
 > [!IMPORTANT]
-> Because this step runs inside the air-gapped network, **no IBM Entitlement Key is required**. You only provide authentication for your local private registry (`jllairgap` / `jllairgap@2026`).
+> Because this step runs inside the air-gapped network, **no IBM Entitlement Key is required**. You only provide authentication for your local private registry (`POCairgap` / `POCairgap@2026`).
 
 ---
 
@@ -824,7 +824,7 @@ flowchart TD
 When `to-filesystem` was run on Host A, it generated `manifests/from-filesystem/*.txt`. The right-hand side of each mapping contains the target registry specified at download time:
 
 ```text
-file:///cpopen/ibm-maximo-operator-catalog@sha256:... = 192.168.2.225:32500/jllairgap/cpopen/...
+file:///cpopen/ibm-maximo-operator-catalog@sha256:... = 192.168.2.225:32500/POCairgap/cpopen/...
 ```
 
 If Cluster B uses a **different** registry IP or hostname (for example: `10.10.20.50:5000` or `registry.cluster-b.internal`), you have two simple ways to handle it:
@@ -899,10 +899,10 @@ metadata:
 spec:
   imageDigestMirrors:
     - mirrors:
-        - 10.10.20.50:5000/jllairgap/cpopen
+        - 10.10.20.50:5000/POCairgap/cpopen
       source: icr.io/cpopen
     - mirrors:
-        - 10.10.20.50:5000/jllairgap/cp
+        - 10.10.20.50:5000/POCairgap/cp
       source: cp.icr.io/cp
 ```
 
@@ -918,7 +918,7 @@ spec:
   displayName: IBM Operator Catalog (Offline)
   publisher: IBM
   sourceType: grpc
-  image: 10.10.20.50:5000/jllairgap/cpopen/ibm-maximo-operator-catalog:v9-260730-amd64
+  image: 10.10.20.50:5000/POCairgap/cpopen/ibm-maximo-operator-catalog:v9-260730-amd64
   updateStrategy:
     registryPoll:
       interval: 45m
